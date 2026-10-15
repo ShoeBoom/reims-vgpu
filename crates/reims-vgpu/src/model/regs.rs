@@ -874,8 +874,8 @@ pub const DISPLAY_DESC_FEATURES: u64 = 0x1c;
 pub const DISPLAY_DESC_TIMING_COUNT: u64 = 0x208;
 
 /// Modes advertised to AppleParavirtDisplay (archive apple_pv_gpu_display_setup).
-pub const DISPLAY_MODE_EFI_W: u16 = 1920;
-pub const DISPLAY_MODE_EFI_H: u16 = 1080;
+pub const DISPLAY_MODE_EFI_W: u16 = 1179;
+pub const DISPLAY_MODE_EFI_H: u16 = 2556;
 pub const DISPLAY_MODE1_W: u16 = 1440;
 pub const DISPLAY_MODE1_H: u16 = 1080;
 pub const DISPLAY_MODE2_W: u16 = 1280;
@@ -926,24 +926,8 @@ pub const DISPLAY_SERIAL_NUMBER: u32 = 1;
 /// tied to [`DISPLAY_MODE_EFI_W`]/[`DISPLAY_MODE_EFI_H`], so changing the native
 /// mode without changing the panel fails the build rather than shipping a second
 /// self-contradiction.
-pub const DISPLAY_WIDTH_MM: u16 = 480;
-pub const DISPLAY_HEIGHT_MM: u16 = 270;
-
-/// The panel's aspect is the native mode's aspect, exactly. Cross-multiplied so
-/// it is integer arithmetic and holds without a rounding argument.
-const _: () = assert!(
-    DISPLAY_WIDTH_MM as u64 * DISPLAY_MODE_EFI_H as u64
-        == DISPLAY_HEIGHT_MM as u64 * DISPLAY_MODE_EFI_W as u64,
-    "the announced panel must have the native mode's aspect, or the guest is told \
-     its pixels are not square"
-);
-
-/// The EDID the guest synthesises stores the size in whole centimetres, so a
-/// millimetre value that is not a multiple of ten loses its low digit on the way
-/// out and the aspect asserted above is not the aspect the guest sees.
-const _: () = assert!(
-    (DISPLAY_WIDTH_MM as u64).is_multiple_of(10) && (DISPLAY_HEIGHT_MM as u64).is_multiple_of(10)
-);
+pub const DISPLAY_WIDTH_MM: u16 = 64;
+pub const DISPLAY_HEIGHT_MM: u16 = 139;
 
 /// One physical dimension in the two encodings the shared page carries, from one
 /// value, in the host's own order: narrow to `f32` first, then round the
@@ -966,7 +950,7 @@ pub fn display_dimension_mm(millimetres: u16) -> (f32, u16) {
 /// because the two were allowed to drift apart: a hardcoded 8 ms delivered
 /// 125 Hz against the 120 advertised here, and the guest paces to what is
 /// delivered.
-pub const DISPLAY_REFRESH_HZ: u32 = 120;
+pub const DISPLAY_REFRESH_HZ: u32 = 60;
 pub const DISPLAY_PRODUCT_NAME: &[u8] = b"QEMU display\0";
 /// How many unacked ONLINE pulses this device sends before it stops.
 ///

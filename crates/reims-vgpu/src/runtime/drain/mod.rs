@@ -4315,12 +4315,8 @@ fn fill_display_descriptor<H: HostMemory + HostOps>(
         psz,
     );
 
-    const MODES: &[(u16, u16)] = &[
-        (DISPLAY_MODE_EFI_W, DISPLAY_MODE_EFI_H),
-        (DISPLAY_MODE1_W, DISPLAY_MODE1_H),
-        (DISPLAY_MODE2_W, DISPLAY_MODE2_H),
-        (DISPLAY_MODE3_W, DISPLAY_MODE3_H),
-    ];
+    // ios-qemu: one fixed phone panel; iOS has no use for desktop modes.
+    const MODES: &[(u16, u16)] = &[(DISPLAY_MODE_EFI_W, DISPLAY_MODE_EFI_H)];
     shared_w16(
         host,
         gpa,
