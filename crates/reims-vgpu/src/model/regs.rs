@@ -873,20 +873,10 @@ pub const DISPLAY_DESC_FEATURES: u64 = 0x1c;
 /// resolution.
 pub const DISPLAY_DESC_TIMING_COUNT: u64 = 0x208;
 
-/// Modes advertised to AppleParavirtDisplay (archive apple_pv_gpu_display_setup).
+/// The one mode advertised to AppleParavirtDisplay (archive
+/// apple_pv_gpu_display_setup): ios-qemu's fixed 1179x2556 phone panel.
 pub const DISPLAY_MODE_EFI_W: u16 = 1179;
 pub const DISPLAY_MODE_EFI_H: u16 = 2556;
-pub const DISPLAY_MODE1_W: u16 = 1440;
-pub const DISPLAY_MODE1_H: u16 = 1080;
-pub const DISPLAY_MODE2_W: u16 = 1280;
-pub const DISPLAY_MODE2_H: u16 = 1024;
-/// 4K UHD, advertised at `DISPLAY_REFRESH_HZ` (120) like every other mode so the
-/// guest can select native 3840×2160 @ 120 Hz. 3840 < `MAX_SCANOUT_DIM` (8192);
-/// a 4K BGRA8 surface is 33 MiB (slab bucket 6). The scanout/present/host-window
-/// geometry is dynamic (follows the presented surface), so no other constant
-/// changes to run the desktop at 4K — see [[scanout-bridge]] mode-switch contract.
-pub const DISPLAY_MODE3_W: u16 = 3840;
-pub const DISPLAY_MODE3_H: u16 = 2160;
 pub const DISPLAY_SERIAL_NUMBER: u32 = 1;
 
 /// The panel's physical size, which the guest turns into an EDID and a DPI.
@@ -901,33 +891,28 @@ pub const DISPLAY_SERIAL_NUMBER: u32 = 1;
 /// two constants divided by ten. Apple's host reaches the same field from
 /// `_PGDisplay`'s `{CGSize=dd}` accessor over its own `_sizeInMillimeters`.
 ///
-/// So the units were right. The *values* were a 4:3 panel announced beside a 16:9
-/// native mode, which tells the guest its pixels are non-square by a third — and
-/// nothing derived them. macOS builds its scaled-resolution list from this DPI, so
-/// a display whose physical aspect contradicts its native mode is a contradiction
-/// the guest resolves somewhere, on every resolution that is not one of the four
-/// this device advertises.
+/// So the units are millimetres, and the values must give square pixels at the
+/// native mode or the guest is told its pixels are not square.
 ///
-/// # Where 48 x 27 cm comes from
+/// # Where 6 x 13 cm comes from
 ///
-/// The guest's EDID stores whole **centimetres**, so the pair has to be a whole-
-/// centimetre multiple of the native mode's aspect or the ratio it announces is
-/// not the ratio meant. 16:9 in whole centimetres is `16k x 9k`, and `k` is
-/// picked by density rather than taste:
-///
-/// | k | size | DPI at 1920x1080 |
-/// |---|---|---|
-/// | 2 | 32 x 18 cm | 152.4 — inside the band where macOS starts offering HiDPI |
-/// | **3** | **48 x 27 cm** | **101.6 — an ordinary desktop monitor** |
-/// | 4 | 64 x 36 cm | 76.2 |
-///
-/// `k = 3` is the only one that is both square-pixelled and unremarkable, so it
-/// is the value, and the assertion below is what keeps it honest: the ratio is
-/// tied to [`DISPLAY_MODE_EFI_W`]/[`DISPLAY_MODE_EFI_H`], so changing the native
-/// mode without changing the panel fails the build rather than shipping a second
-/// self-contradiction.
-pub const DISPLAY_WIDTH_MM: u16 = 64;
-pub const DISPLAY_HEIGHT_MM: u16 = 139;
+/// ios-qemu presents one fixed phone panel, 1179x2556 (iPhone 15/16). The
+/// guest's EDID stores whole **centimetres**, so the pair is the whole-
+/// centimetre size closest to that aspect: 6 x 13 cm is 499 DPI both ways, the
+/// two densities within 0.1% of each other, which is a phone's density. The
+/// exact-aspect assertion a 16:9 desktop panel could carry has no whole-
+/// centimetre solution at 393:852; the test beside these constants holds the
+/// pixels square to within a percent instead.
+pub const DISPLAY_WIDTH_MM: u16 = 60;
+pub const DISPLAY_HEIGHT_MM: u16 = 130;
+
+/// The EDID the guest synthesises stores the size in whole centimetres, so a
+/// millimetre value that is not a multiple of ten loses its low digit on the way
+/// out and the density checked beside these constants is not the one the guest
+/// sees.
+const _: () = assert!(
+    (DISPLAY_WIDTH_MM as u64).is_multiple_of(10) && (DISPLAY_HEIGHT_MM as u64).is_multiple_of(10)
+);
 
 /// One physical dimension in the two encodings the shared page carries, from one
 /// value, in the host's own order: narrow to `f32` first, then round the
@@ -1120,23 +1105,19 @@ pub const DEVICE_INFO_KEY_DUAL_PLANE_TEXTURES: u32 = 12;
 /// Key 11 was narrowed because *no host* this device runs on can execute those
 /// primitive types — the refusal is permanent, so the honest advertisement is
 /// the narrow one. Framebuffer read is not that: the Vulkan arm implements the
-/// attachment-0 fetch through a subpass input attachment, which is Vulkan 1.0
-/// core and needs no capability; the Metal arm serves an Apple GPU, whose
-/// families all have it. What is missing is only the fetch of a *secondary* MRT
-/// attachment, which `runtime::draw::vulkan` refuses by name as
-/// `draw_prepare_color_input_mrt_unsupported`.
+/// fetch of any colour attachment through a subpass input attachment, which is
+/// Vulkan 1.0 core and needs no capability; the Metal arm serves an Apple GPU,
+/// whose families all have it. The secondary-attachment fetch was once the
+/// gap this device had not closed, refused by name until iOS's CoreAnimation
+/// needed it.
 ///
-/// So the gap is this device's to close, not to hide, and a `0` here would be
-/// the worse answer twice over: it would take away the fetch that works, and it
-/// would describe a GPU the guest is not running on. **The rule the pair
+/// A `0` here would have been the worse answer twice over: it would take away
+/// the fetch that works, and it would describe a GPU the guest is not running
+/// on. **The rule the pair
 /// establishes: narrow an advertisement when the host can never do the thing;
 /// leave it and name the refusal when the host can do it and this device has
 /// not finished the path.** A boolean cannot say "attachment 0 only", and
 /// inventing a narrower answer than the wire has room for is not fidelity.
-///
-/// `draw_prepare_color_input_mrt_unsupported` has never fired on any archived
-/// boot of this rig, driven or idle. That is the reading that makes leaving it
-/// open affordable rather than a bet.
 pub const DEVICE_INFO_KEY_FRAMEBUFFER_READ: u32 = 7;
 
 /// Wire key 8 — `isRGB10A2GammaSupported`. A byte, like key 7.
@@ -1763,27 +1744,21 @@ mod tests {
         assert_eq!((269.4f32 as f64 + 0.5) as u16, 269);
     }
 
-    /// The announced panel is 16:9 because the native mode is, and the DPI it
-    /// implies is an ordinary desktop one.
-    ///
-    /// The aspect itself is a `const` assertion at the declaration and cannot
-    /// reach here. What this adds is the density, which is the reason `k = 3`
-    /// was chosen over `k = 2`: 2 lands at 152 DPI, inside the band where macOS
-    /// starts offering HiDPI modes, and this device has no HiDPI rail.
+    /// The announced phone panel has square pixels at a phone's density.
     #[test]
-    fn the_announced_panel_is_an_ordinary_desktop_density() {
+    fn the_announced_panel_is_a_square_pixelled_phone() {
         // Tenths of a DPI, to stay in integer arithmetic.
         let dpi_x10 = |px: u16, mm: u16| (px as u64 * 254 * 10) / (mm as u64 * 10);
         let horizontal = dpi_x10(DISPLAY_MODE_EFI_W, DISPLAY_WIDTH_MM);
         let vertical = dpi_x10(DISPLAY_MODE_EFI_H, DISPLAY_HEIGHT_MM);
-        assert_eq!(
-            horizontal, vertical,
-            "square pixels, or the guest is misled"
+        assert!(
+            horizontal.abs_diff(vertical) * 100 <= vertical,
+            "square pixels within a percent, or the guest is misled: \
+             {horizontal} vs {vertical} tenths of a DPI"
         );
         assert!(
-            (900..1440).contains(&horizontal),
-            "{horizontal} tenths of a DPI is outside the ordinary desktop band; \
-             1440 is where macOS begins treating a display as HiDPI"
+            (4000..6000).contains(&horizontal),
+            "{horizontal} tenths of a DPI is not a phone panel"
         );
     }
 
@@ -2241,15 +2216,8 @@ mod tests {
 
     #[test]
     fn advertised_modes_fit_the_scanout_contract() {
-        for (width, height) in [
-            (DISPLAY_MODE_EFI_W, DISPLAY_MODE_EFI_H),
-            (DISPLAY_MODE1_W, DISPLAY_MODE1_H),
-            (DISPLAY_MODE2_W, DISPLAY_MODE2_H),
-            (DISPLAY_MODE3_W, DISPLAY_MODE3_H),
-        ] {
-            assert!(u32::from(width) <= MAX_SCANOUT_DIM);
-            assert!(u32::from(height) <= MAX_SCANOUT_DIM);
-        }
+        assert!(u32::from(DISPLAY_MODE_EFI_W) <= MAX_SCANOUT_DIM);
+        assert!(u32::from(DISPLAY_MODE_EFI_H) <= MAX_SCANOUT_DIM);
         assert_eq!(DISPLAY_PRODUCT_NAME.last(), Some(&0));
     }
 }

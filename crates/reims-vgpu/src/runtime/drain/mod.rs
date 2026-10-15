@@ -4227,9 +4227,9 @@ fn shared_w32<H: HostMemory + HostOps>(host: &mut H, gpa: u64, off: u64, v: u32,
 /// Fill the guest display descriptor page (archive `apple_pv_gpu_display_setup`).
 ///
 ///: `+0x208` is the timing-element **count**, not a
-/// pixel width. Modes are 1920×1080, 1440×1080, 1280×1024 (apple-gfx A/B
-/// reference geometry) plus 3840×2160 (4K UHD), each advertised at
-/// `DISPLAY_REFRESH_HZ` (120 Hz), so the guest always latches the 120 Hz mode.
+/// pixel width. ios-qemu advertises one element, the 1179×2556 phone panel at
+/// `DISPLAY_REFRESH_HZ`. The macOS rig this came from advertised four desktop
+/// modes at 120 Hz; the measurement below is from that table.
 ///
 /// # "Always" is measured, and it holds on the boots that look like it does not
 ///

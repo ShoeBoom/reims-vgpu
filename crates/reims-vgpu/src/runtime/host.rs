@@ -436,7 +436,8 @@ pub trait HostOps {
 
     /// Read guest CPU X-register `index` (0..30). Default: none.
     /// Used only on the MMIO path that publishes an iosfc mapper request so
-    /// x19/x21/x22 still hold the directed MappingInternal handoff.
+    /// the directed MappingInternal handoff is still in its registers
+    /// (`iosurface_pages::MAPPER_LAYOUTS`).
     fn read_xreg(&self, _index: u32) -> Result<u64, MemError> {
         Err(MemError::XregUnavailable)
     }

@@ -39,11 +39,12 @@ use crate::observe::Decline;
 // Metal arm tests the band instead (`load_action_in_contract`).
 use crate::runtime::decode::resource::{
     decode_buffer_texture_descriptor, decode_depth_stencil_descriptor,
-    decode_render_pipeline_descriptor, decode_texture_descriptor, texture_view_opcode,
-    BufferTextureDescriptor, DecodeStatus, RenderPipelineDescriptor,
-    OBJECT_TYPE_MAPPER_REF_TEXTURE, OBJECT_TYPE_SERIALIZER_OBJECT, OBJECT_TYPE_TEXTURE,
-    OBJECT_TYPE_TEXTURE_GENERATE_MIPMAPS, OBJECT_TYPE_TEXTURE_VIEW,
-    TEXTURE_VIEW_OPCODE_BUFFER_TEXTURE, TEXTURE_VIEW_OPCODE_BUFFER_TEXTURE_WIDE,
+    decode_memoryless_texture_descriptor, decode_render_pipeline_descriptor,
+    decode_texture_descriptor, texture_view_opcode, BufferTextureDescriptor, DecodeStatus,
+    RenderPipelineDescriptor, OBJECT_TYPE_MAPPER_REF_TEXTURE, OBJECT_TYPE_MEMORYLESS_TEXTURE,
+    OBJECT_TYPE_SERIALIZER_OBJECT, OBJECT_TYPE_TEXTURE, OBJECT_TYPE_TEXTURE_GENERATE_MIPMAPS,
+    OBJECT_TYPE_TEXTURE_VIEW, TEXTURE_VIEW_OPCODE_BUFFER_TEXTURE,
+    TEXTURE_VIEW_OPCODE_BUFFER_TEXTURE_WIDE,
 };
 use crate::runtime::gva_mem;
 use crate::runtime::host::{HostMemory, HostOps};
@@ -494,7 +495,8 @@ pub struct IndexedDrawInfo {
 ///
 /// Archive `ApplePVGPURenderTarget`: either mapper-ref-texture IOSurface (`mapping_id`) or
 /// normal-texture guest-VA linear (`target_gva` + `row_stride`). Wallpaper/background
-/// layers are the GVA form.
+/// layers are the GVA form. Neither (both zero) is a memoryless texture, which
+/// has no storage: it renders on the host and is never loaded or stored.
 #[derive(Clone, Debug, Default)]
 pub struct ColorRtRequest {
     pub slot: u32,
@@ -2537,18 +2539,20 @@ pub fn mrt_draw_request<M: HostMemory + HostOps>(
         let mut load_action = att.load_action;
         let mut clear_color = att.clear_color;
         let mut seed = None;
+        // Seeds are guest-VA only: a mapping seeds on the engine side, and a
+        // memoryless target (neither a mapping nor a VA) has nothing to seed from.
         if let Some(cl) = clears.iter().find(|a| a.texture_ref == att.texture_ref) {
             // Clear-only stream record for this attachment: real Metal Clear.
             load_action = MTL_LOAD_ACTION_CLEAR;
             clear_color = cl.clear_color;
-            if mapping_id == 0 {
+            if gva != 0 {
                 seed = Some(solid_rgba8(mw, mh, &cl.clear_color));
             }
         } else if att.load_action == MTL_LOAD_ACTION_CLEAR {
-            if mapping_id == 0 {
+            if gva != 0 {
                 seed = Some(solid_rgba8(mw, mh, &att.clear_color));
             }
-        } else if att.load_action == MTL_LOAD_ACTION_LOAD && mapping_id == 0 {
+        } else if att.load_action == MTL_LOAD_ACTION_LOAD && gva != 0 {
             // # This arm compares an ordinal, and the contract term is wider
             //
             // `MTLLoadActionDontCare` also promises the prior contents --

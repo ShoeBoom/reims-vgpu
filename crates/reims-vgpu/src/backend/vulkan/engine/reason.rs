@@ -126,6 +126,13 @@ pub enum DrawReason {
         requested: usize,
         cap: usize,
     },
+    /// The fragment shader fetches a colour attachment the pass does not
+    /// have: bit N of `inputs` is `dest_N`, and `color_targets` counts the
+    /// primary plus its secondaries.
+    ColorInputUnattached {
+        inputs: u8,
+        color_targets: usize,
+    },
     /// The guest's sampler declaration is not one the guest API admits — an
     /// ordinal outside an enum, an inverted level-of-detail clamp, or the one
     /// unnormalized-coordinate restriction that cannot be conformed away.
@@ -337,6 +344,7 @@ impl crate::observe::Decline for DrawReason {
             Self::ResidentSampledNot2d { .. } => "resident_sampled_not_2d",
             Self::GuestRunSampledNot2d { .. } => "guest_run_sampled_not_2d",
             Self::SecondaryAttachmentCap { .. } => "secondary_attachment_cap",
+            Self::ColorInputUnattached { .. } => "color_input_unattached",
             Self::ViewportSlotsUnsupported { .. } => "viewport_slots_unsupported",
             Self::VisibilityCountingUnsupported { .. } => "visibility_counting_unsupported",
             Self::MultisampleAttachmentSampleCountMismatch { .. } => {
@@ -415,6 +423,10 @@ impl std::fmt::Display for DrawReason {
             Self::SecondaryAttachmentCap { requested, cap } => {
                 write!(f, " requested={requested} cap={cap}")
             }
+            Self::ColorInputUnattached {
+                inputs,
+                color_targets,
+            } => write!(f, " inputs={inputs:#x} color_targets={color_targets}"),
             Self::ViewportSlotsUnsupported {
                 requested,
                 limit,
@@ -648,6 +660,10 @@ mod tests {
         DrawReason::SecondaryAttachmentCap {
             requested: 0,
             cap: 0,
+        },
+        DrawReason::ColorInputUnattached {
+            inputs: 0,
+            color_targets: 0,
         },
         DrawReason::ViewportSlotsUnsupported {
             requested: 0,

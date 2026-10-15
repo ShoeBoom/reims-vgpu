@@ -546,11 +546,12 @@ pub(crate) struct PassKey {
     /// pass); the depth attachment is always appended AFTER color + secondaries
     /// so slot 0 stays the primary color (the zero-copy readback assumes this).
     pub depth: Option<DepthAttachKey>,
-    /// Attachment 0 is ALSO referenced as a subpass input (framebuffer fetch).
-    /// Both references use GENERAL layout and the subpass carries a BY_REGION
-    /// self-dependency — the Vulkan feedback-loop form MoltenVK lowers to Metal
-    /// programmable blending. `false` keeps the pass byte-identical.
-    pub color_input: bool,
+    /// Bit N says colour attachment N is ALSO referenced as subpass input N
+    /// (framebuffer fetch of `dest_N`). Both references use GENERAL layout and
+    /// the subpass carries a BY_REGION self-dependency — the Vulkan
+    /// feedback-loop form MoltenVK lowers to Metal programmable blending. `0`
+    /// keeps the pass byte-identical. One byte, like `feedback_colors`.
+    pub color_inputs: u8,
     /// Bit N says colour attachment N is also sampled through
     /// `VK_EXT_attachment_feedback_loop_layout`. The decoded render pass has at
     /// most eight colour attachments, so the wire-derived attachment table is
@@ -573,7 +574,7 @@ impl PassKey {
             secondary: [SecondaryAttachKey::default(); MAX_SECONDARY_ATTACH],
             secondary_count: 0,
             depth: None,
-            color_input: false,
+            color_inputs: 0,
             feedback_colors: 0,
             sample_count: 1,
             multisample_resolve: false,
@@ -582,6 +583,10 @@ impl PassKey {
 
     pub(crate) fn color_feedback(self, index: usize) -> bool {
         index < u8::BITS as usize && self.feedback_colors & (1u8 << index) != 0
+    }
+
+    pub(crate) fn color_input(self, index: usize) -> bool {
+        index < u8::BITS as usize && self.color_inputs & (1u8 << index) != 0
     }
 
     /// The part of a render pass that Vulkan requires to agree for pipeline,
@@ -646,7 +651,7 @@ impl PassKey {
     pub(crate) fn color_layout(self, index: usize) -> vk::ImageLayout {
         if self.color_feedback(index) {
             color_feedback_layout()
-        } else if index == 0 && (self.color_input || self.host_accessible_color0) {
+        } else if self.color_input(index) || (index == 0 && self.host_accessible_color0) {
             vk::ImageLayout::GENERAL
         } else {
             // The same layout the pass exits at, so an ordinary pass performs no
@@ -772,7 +777,7 @@ impl PassCompatibilityKey {
             secondary,
             secondary_count,
             depth,
-            color_input,
+            color_inputs,
             feedback_colors,
             sample_count,
             multisample_resolve,
@@ -793,7 +798,7 @@ impl PassCompatibilityKey {
         if host_accessible_color0 != them.host_accessible_color0 {
             return Some(PassCompatField::HostAccessibleColor0);
         }
-        if color_input != them.color_input {
+        if color_inputs != them.color_inputs {
             return Some(PassCompatField::ColorInput);
         }
         if feedback_colors != them.feedback_colors {
@@ -1509,7 +1514,7 @@ fn external_dependencies(
         attach_writes |= vk::AccessFlags::DEPTH_STENCIL_ATTACHMENT_WRITE;
         attach_reads |= vk::AccessFlags::DEPTH_STENCIL_ATTACHMENT_READ;
     }
-    // Framebuffer fetch reads attachment 0 through the fragment stage, so the
+    // Framebuffer fetch reads colour attachments through the fragment stage, so the
     // incoming transition has to be visible to that read too. The intra-subpass
     // ordering is the separate `BY_REGION` dependency; this is the entry.
     //
@@ -2152,9 +2157,10 @@ impl ObjectCaches {
             .stencil_store_op(vk::AttachmentStoreOp::DONT_CARE)
             .initial_layout(initial)
             .final_layout(color0_final)];
-        // Framebuffer fetch: when attachment 0 is also a subpass input, BOTH
-        // references must use GENERAL (same-attachment color+input requires it);
-        // the pass still transitions initial→GENERAL→final automatically.
+        // Framebuffer fetch: when a colour attachment is also a subpass input,
+        // BOTH references must use GENERAL (same-attachment color+input requires
+        // it; see `color_layout`); the pass still transitions
+        // initial→GENERAL→final automatically.
         let color0_layout = key.color_layout(0);
         let mut color_ref = vec![vk::AttachmentReference::default()
             .attachment(0)
@@ -2255,16 +2261,28 @@ impl ObjectCaches {
                 .attachment(index)
                 .layout(vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL)
         });
-        let input_ref = [vk::AttachmentReference::default()
-            .attachment(0)
-            .layout(key.color_layout(0))];
+        // Input attachment N is colour attachment N (the translator decorates
+        // `dest_N` with `InputAttachmentIndex N`); a colour slot nothing fetches
+        // is unused.
+        let input_count = u8::BITS - key.color_inputs.leading_zeros();
+        let input_ref: Vec<_> = (0..input_count as usize)
+            .map(|index| {
+                if key.color_input(index) {
+                    color_ref[index]
+                } else {
+                    vk::AttachmentReference::default()
+                        .attachment(vk::ATTACHMENT_UNUSED)
+                        .layout(vk::ImageLayout::UNDEFINED)
+                }
+            })
+            .collect();
         let mut subpass_desc = vk::SubpassDescription::default()
             .pipeline_bind_point(vk::PipelineBindPoint::GRAPHICS)
             .color_attachments(&color_ref);
         if !resolve_ref.is_empty() {
             subpass_desc = subpass_desc.resolve_attachments(&resolve_ref);
         }
-        if key.color_input {
+        if !input_ref.is_empty() {
             subpass_desc = subpass_desc.input_attachments(&input_ref);
         }
         if let Some(depth_ref) = &depth_ref {
@@ -2284,12 +2302,12 @@ impl ObjectCaches {
             .dependency_flags(vk::DependencyFlags::BY_REGION);
         let mut deps: Vec<vk::SubpassDependency> = external_dependencies(
             key.depth.is_some(),
-            key.color_input,
+            key.color_inputs != 0,
             key.host_accessible_color0,
             pass_exit_scope_narrow(),
         )
         .to_vec();
-        if key.color_input {
+        if key.color_inputs != 0 {
             deps.push(fetch_dep);
         }
         deps.push(color_feedback_self_dependency(key.color_layout(0)));
@@ -3198,7 +3216,7 @@ mod object_cache_tests {
         assert_ne!(clear.compatibility(), different_format.compatibility());
 
         let mut different_subpass = load;
-        different_subpass.color_input = true;
+        different_subpass.color_inputs = 1;
         assert_ne!(clear.compatibility(), different_subpass.compatibility());
 
         let mut different_depth = load;
@@ -3273,7 +3291,7 @@ mod object_cache_tests {
             ),
             (
                 "color input",
-                |k| k.color_input = true,
+                |k| k.color_inputs = 1,
                 Some(PassCompatField::ColorInput),
             ),
             // Feedback is a property of the draw, and it makes two passes
@@ -3335,7 +3353,7 @@ mod object_cache_tests {
         assert_ne!(plain.compatibility(), transported.compatibility());
 
         let mut input = transported;
-        input.color_input = true;
+        input.color_inputs = 1;
         assert_ne!(
             plain.framebuffer_compatibility(),
             input.framebuffer_compatibility()
@@ -4221,7 +4239,7 @@ mod object_cache_tests {
                         "{shape}: depth terms follow the depth attachment"
                     );
 
-                    // Framebuffer fetch reads attachment 0 in the fragment stage, so
+                    // Framebuffer fetch reads colour attachments in the fragment stage, so
                     // the entry transition must be visible to that read as well.
                     assert_eq!(
                         incoming
@@ -4251,7 +4269,7 @@ mod object_cache_tests {
         key.host_accessible_color0 = true;
         for color_input in [false, true] {
             for feedback in [false, true] {
-                key.color_input = color_input;
+                key.color_inputs = u8::from(color_input);
                 key.feedback_colors = u8::from(feedback);
                 assert_eq!(
                     key.color_layout(0),
@@ -4269,6 +4287,20 @@ mod object_cache_tests {
         assert_eq!(key.color_layout(1), color0_pass_exit_layout());
     }
 
+    /// A fetched secondary is input N of its own slot: its subpass reference
+    /// and its descriptor both name it GENERAL, while an unfetched primary
+    /// rests where an ordinary colour slot does.
+    #[test]
+    fn a_fetched_secondary_is_general_and_leaves_the_primary_ordinary() {
+        let mut key = PassKey::single(Color0Load::Preserve, vk::Format::R8G8B8A8_UNORM);
+        key.secondary_count = 1;
+        key.color_inputs = 1 << 1;
+        assert!(!key.color_input(0));
+        assert!(key.color_input(1));
+        assert_eq!(key.color_layout(0), color0_pass_exit_layout());
+        assert_eq!(key.color_layout(1), vk::ImageLayout::GENERAL);
+    }
+
     /// The pass key is the single source of truth for every place that names an
     /// attachment layout, and a feedback slot names the one
     /// [`color_feedback_layout`] answers at both ends of the pass.
@@ -4283,7 +4315,7 @@ mod object_cache_tests {
     #[test]
     fn feedback_attachment_layout_is_derived_consistently_from_the_mask() {
         let mut key = PassKey::single(Color0Load::Preserve, vk::Format::R8G8B8A8_UNORM);
-        key.color_input = true;
+        key.color_inputs = 1;
         key.feedback_colors = (1 << 0) | (1 << 3);
 
         for index in 0..=MAX_SECONDARY_ATTACH {
@@ -4365,12 +4397,12 @@ mod object_cache_tests {
     fn pass_dependency_count(key: PassKey) -> usize {
         external_dependencies(
             key.depth.is_some(),
-            key.color_input,
+            key.color_inputs != 0,
             key.host_accessible_color0,
             pass_exit_scope_narrow(),
         )
         .len()
-            + usize::from(key.color_input)
+            + usize::from(key.color_inputs != 0)
             + 1
     }
 

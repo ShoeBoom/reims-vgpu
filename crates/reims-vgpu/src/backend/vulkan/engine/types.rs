@@ -661,13 +661,15 @@ pub struct DrawRequest {
     /// buffer, byte-identical to the pre-depth 2D path. Set only for a draw that
     /// bound a non-trivial `MTLDepthStencilState` (see `runtime::draw`).
     pub depth: Option<DepthState>,
-    /// Fragment shader reads its destination pixel (Metal framebuffer fetch:
-    /// an `air.render_target` INPUT param, translated as a `SubpassData` image
-    /// at [`COLOR_INPUT_BINDING`]). The engine then references attachment 0 as
-    /// a subpass input (GENERAL layout, BY_REGION self-dependency) and writes
-    /// an INPUT_ATTACHMENT descriptor pointing at the color target's view.
-    /// `false` (default) keeps the pass byte-identical to the pre-fetch engine.
-    pub color_input: bool,
+    /// Colour attachments the fragment shader reads at its own pixel (Metal
+    /// framebuffer fetch: an `air.render_target` INPUT param `dest_N`,
+    /// translated as a `SubpassData` image at [`COLOR_INPUT_BINDING`]` + N`).
+    /// Bit N is colour attachment N: the engine references it as subpass input
+    /// N (GENERAL layout, BY_REGION self-dependency) and writes an
+    /// INPUT_ATTACHMENT descriptor pointing at its view. A bit with no
+    /// attachment is refused. `0` (default) keeps the pass byte-identical to
+    /// the pre-fetch engine.
+    pub color_inputs: u8,
     /// The preceding engine request belongs to this draw's Metal render
     /// encoder. Used only when its Vulkan pass is still open and identical.
     pub continues_render_pass: bool,
@@ -784,12 +786,13 @@ pub fn viewport_slot_count(req: &DrawRequest) -> usize {
     req.viewports.len().max(req.scissors.len()).max(1)
 }
 
-/// Descriptor binding of the attachment-0 framebuffer-fetch input attachment.
+/// Descriptor binding of the attachment-0 framebuffer-fetch input attachment;
+/// attachment N's is this plus N.
 ///
 /// This is the *device's* ColorInput band base, not the translator's: the band
 /// moved up when the texture band was widened to Metal's 128 entries
 /// (`runtime::spirv_bind::widen_sampled_bands` rewrites `dest_N` from the
-/// translator's `96+N` to `192+N`). Only `dest_0` is supported. Kept equal to
+/// translator's `96+N` to `192+N`). Kept equal to
 /// `runtime::spirv_bind::COLOR_INPUT_BINDING_BASE` by a unit test there, because
 /// the two constants live on opposite sides of the runtime/engine layering.
 /// Both fragment relocations preserve it.
@@ -2725,7 +2728,7 @@ mod tests {
         assert!(draw.target_identity.is_none());
         assert!(draw.depth.is_none());
         assert!(!draw.skip_readback);
-        assert!(!draw.color_input);
+        assert_eq!(draw.color_inputs, 0);
 
         let compute = ComputeRequest::default();
         assert_eq!(compute.dispatch, ComputeDispatch::Workgroups([0, 0, 0]));

@@ -70,8 +70,6 @@ pub enum MrtDrop {
     GeometryMismatch,
     /// The secondary's pixel format has no known engine mapping.
     UnknownFormat,
-    /// The secondary target has no resident identity to render into.
-    NoIdentity,
     /// The secondary resolves to the primary's own resident.
     AliasesPrimary,
 }
@@ -96,7 +94,6 @@ impl crate::observe::Decline for MrtDrop {
             Self::NonContiguousSlot => "mrt_drop_non_contiguous_slot",
             Self::GeometryMismatch => "mrt_drop_geometry_mismatch",
             Self::UnknownFormat => "mrt_drop_unknown_format",
-            Self::NoIdentity => "mrt_drop_no_identity",
             Self::AliasesPrimary => "mrt_drop_aliases_primary",
         }
     }
@@ -109,7 +106,6 @@ impl MrtDrop {
             Self::NonContiguousSlot => 1,
             Self::GeometryMismatch => 2,
             Self::UnknownFormat => 3,
-            Self::NoIdentity => 4,
             Self::AliasesPrimary => 5,
         }
     }

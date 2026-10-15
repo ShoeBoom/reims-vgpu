@@ -1,7 +1,7 @@
 //! IOSurface mapper capture + page-table / geometry resolve.
 //!
-//! Capture runs on the iosfc producer MMIO path (guest x19/x21/x22 still hold
-//! the directed handoff from `do_host_mapping_gated`). Resolve builds
+//! Capture runs on the iosfc producer MMIO path (the guest registers still hold
+//! the directed handoff from `do_host_mapping_gated`; see `MAPPER_LAYOUTS`). Resolve builds
 //! `MappingEntry.page_entries` and geometry from MappingInternal + device
 //! descriptor via guest KVA reads ([`HostOps::read_kva`]).
 
@@ -12,8 +12,7 @@ use crate::protocol::iosurface_pages::{
     self, build_table_plan, decode_device_surface, decode_mapper_request_entry, guest_kernel_va,
     mapper_request_published_entry_offset, mapping_span_bound, read_internal_desc_ptr,
     read_mapper_identity, read_mapper_internal, validate_mapper_internal, PagesMemory,
-    DEVICE_DESC_LEN, MAPPER_CAPTURE_REG_MAPPER_DEVICE, MAPPER_CAPTURE_REG_MAPPING_INTERNAL,
-    MAPPER_CAPTURE_REG_REQUEST_TYPE, MAPPER_REQUEST_ENTRY_LEN, MAPPER_REQUEST_MAP,
+    DEVICE_DESC_LEN, MAPPER_LAYOUTS, MAPPER_REQUEST_ENTRY_LEN, MAPPER_REQUEST_MAP,
     MAPPER_REQUEST_UNMAP,
 };
 use crate::runtime::host::{HostMemory, HostOps, MemError};
@@ -217,40 +216,58 @@ pub fn capture_at_producer<H: HostMemory + HostOps>(
     // per (mapping_id, reason). The mapping's MappingInternal never attaches and
     // downstream present/Store paints black otherwise.
     let mid = request.mapping_id;
-    let mapper = match host.read_xreg(MAPPER_CAPTURE_REG_MAPPER_DEVICE) {
-        Ok(value) => value,
-        Err(error) => {
-            let decline = MapperDecline::CaptureMapperXregRead(error);
-            return capture_xreg_failed(mid, producer, decline);
+    // The guest build's layout is the one whose request-type register agrees
+    // with the ring entry; see `MAPPER_LAYOUTS`.
+    let mut rtypes = Vec::with_capacity(MAPPER_LAYOUTS.len());
+    let mut matched = None;
+    for layout in &MAPPER_LAYOUTS {
+        let rtype = match host.read_xreg(layout.request_type_reg) {
+            Ok(value) => value as u32,
+            Err(error) => {
+                let decline = MapperDecline::CaptureRequestTypeXregRead(error);
+                return capture_xreg_failed(mid, producer, decline);
+            }
+        };
+        if rtype == request.request_type {
+            matched = Some(*layout);
+            break;
         }
-    };
-    let rtype = match host.read_xreg(MAPPER_CAPTURE_REG_REQUEST_TYPE) {
-        Ok(value) => value as u32,
-        Err(error) => {
-            let decline = MapperDecline::CaptureRequestTypeXregRead(error);
-            return capture_xreg_failed(mid, producer, decline);
-        }
-    };
-    let internal = match host.read_xreg(MAPPER_CAPTURE_REG_MAPPING_INTERNAL) {
-        Ok(value) => value,
-        Err(error) => {
-            let decline = MapperDecline::CaptureInternalXregRead(error);
-            return capture_xreg_failed(mid, producer, decline);
-        }
-    };
-    if rtype != request.request_type {
+        rtypes.push(rtype);
+    }
+    let Some(layout) = matched else {
         let decline = MapperDecline::CaptureRequestTypeMismatch;
         note_capture_fail(
             mid,
             crate::observe::Decline::slug(&decline),
             crate::observe::Emit::decline("mapper_capture_fail", &decline)
                 .field("mapping", mid)
-                .field("rtype", rtype)
+                .field(
+                    "rtypes",
+                    rtypes
+                        .iter()
+                        .map(u32::to_string)
+                        .collect::<Vec<_>>()
+                        .join(","),
+                )
                 .field("request_type", request.request_type)
                 .render(),
         );
         return None;
-    }
+    };
+    let mapper = match host.read_xreg(layout.mapper_device_reg) {
+        Ok(value) => value,
+        Err(error) => {
+            let decline = MapperDecline::CaptureMapperXregRead(error);
+            return capture_xreg_failed(mid, producer, decline);
+        }
+    };
+    let internal = match host.read_xreg(layout.mapping_internal_reg) {
+        Ok(value) => value,
+        Err(error) => {
+            let decline = MapperDecline::CaptureInternalXregRead(error);
+            return capture_xreg_failed(mid, producer, decline);
+        }
+    };
     if internal == 0 {
         let decline = MapperDecline::CaptureInternalZero;
         note_capture_fail(
@@ -323,8 +340,9 @@ pub fn capture_at_producer<H: HostMemory + HostOps>(
     Some(MapperCapture {
         producer,
         mapper_device_kva: mapper,
-        request_type: rtype,
+        request_type: request.request_type,
         mapping_internal: internal,
+        layout,
     })
 }
 
@@ -344,6 +362,7 @@ pub fn apply_capture(state: &mut DeviceState, cap: &MapperCapture, mapping_id: u
     if cap.mapper_device_kva != 0 {
         state.mapper_device_kva = cap.mapper_device_kva;
     }
+    state.mapper_layout = cap.layout;
     state.attach_mapping_internal(mapping_id, cap.mapping_internal)
 }
 
@@ -368,61 +387,62 @@ pub fn resolve_mapping_backing<H: HostMemory + HostOps>(
     let had_cached_pages = cached_pages != 0;
     let mem = MapperMem::new(host);
 
-    let fields = match read_mapper_internal(&mem, internal, mapper != 0, mapper) {
-        Ok(f) => f,
-        Err(status) => {
-            let reason = refusal_reason(&status);
-            let host_error = mem.last_error();
-            let host_reason = host_error
-                .map(|error| crate::observe::Decline::slug(&error))
-                .unwrap_or("none");
-            if had_cached_pages {
-                // QEMU can stop exposing a CPU-backed KVA alias after the
-                // mapper handoff while the already-validated GPA page plan
-                // remains live. Likewise, a transiently unmapped debug-read
-                // alias says nothing about the cached guest-physical pages.
-                // Both are the normal revalidation fallback, not a decoded
-                // guest-command refusal; emitting them once per recycled
-                // mapping id made a healthy boot fire dozens of new Phase-5
-                // lines. Keep other cached-plan failures visible because they
-                // describe malformed identity fields rather than alias
-                // availability.
-                if matches!(host_error, Some(MemError::NoCpu | MemError::Unmapped)) {
+    let fields =
+        match read_mapper_internal(&mem, &state.mapper_layout, internal, mapper != 0, mapper) {
+            Ok(f) => f,
+            Err(status) => {
+                let reason = refusal_reason(&status);
+                let host_error = mem.last_error();
+                let host_reason = host_error
+                    .map(|error| crate::observe::Decline::slug(&error))
+                    .unwrap_or("none");
+                if had_cached_pages {
+                    // QEMU can stop exposing a CPU-backed KVA alias after the
+                    // mapper handoff while the already-validated GPA page plan
+                    // remains live. Likewise, a transiently unmapped debug-read
+                    // alias says nothing about the cached guest-physical pages.
+                    // Both are the normal revalidation fallback, not a decoded
+                    // guest-command refusal; emitting them once per recycled
+                    // mapping id made a healthy boot fire dozens of new Phase-5
+                    // lines. Keep other cached-plan failures visible because they
+                    // describe malformed identity fields rather than alias
+                    // availability.
+                    if matches!(host_error, Some(MemError::NoCpu | MemError::Unmapped)) {
+                        return true;
+                    }
+                    note_resolve_keep_cached(
+                        mapping_id,
+                        reason,
+                        crate::observe::Emit::refusal("mapper_revalidate_fallback", &status)
+                            .expect("the error arm cannot carry Status::Ok")
+                            .field("mapping", mapping_id)
+                            .field("pages", cached_pages)
+                            .field("table", format!("{cached_table:#x}"))
+                            .field("internal", format!("{internal:#x}"))
+                            .field("mapper_kva", format!("{mapper:#x}"))
+                            .field("host_reason", host_reason)
+                            .render(),
+                    );
                     return true;
                 }
-                note_resolve_keep_cached(
+                // A mapped surface (m.mapped, mapping_internal != 0) whose mapper
+                // internal KVA is unreadable is a genuine anomaly, not the
+                // not-yet-mapped poll — every downstream present/Store for this
+                // mapping then paints black with no reason.
+                note_resolve_fail(
                     mapping_id,
                     reason,
-                    crate::observe::Emit::refusal("mapper_revalidate_fallback", &status)
+                    crate::observe::Emit::refusal("mapper_resolve_fail", &status)
                         .expect("the error arm cannot carry Status::Ok")
                         .field("mapping", mapping_id)
-                        .field("pages", cached_pages)
-                        .field("table", format!("{cached_table:#x}"))
                         .field("internal", format!("{internal:#x}"))
                         .field("mapper_kva", format!("{mapper:#x}"))
                         .field("host_reason", host_reason)
                         .render(),
                 );
-                return true;
+                return false;
             }
-            // A mapped surface (m.mapped, mapping_internal != 0) whose mapper
-            // internal KVA is unreadable is a genuine anomaly, not the
-            // not-yet-mapped poll — every downstream present/Store for this
-            // mapping then paints black with no reason.
-            note_resolve_fail(
-                mapping_id,
-                reason,
-                crate::observe::Emit::refusal("mapper_resolve_fail", &status)
-                    .expect("the error arm cannot carry Status::Ok")
-                    .field("mapping", mapping_id)
-                    .field("internal", format!("{internal:#x}"))
-                    .field("mapper_kva", format!("{mapper:#x}"))
-                    .field("host_reason", host_reason)
-                    .render(),
-            );
-            return false;
-        }
-    };
+        };
     let status = validate_mapper_internal(&mem, mapping_id, &fields);
     if status != iosurface_pages::Status::Ok {
         let reason = refusal_reason(&status);

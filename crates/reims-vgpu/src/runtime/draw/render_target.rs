@@ -341,7 +341,8 @@ fn differed_before(surface_id: u32) -> bool {
 pub(super) struct ResolvedRenderTarget {
     /// Non-zero ⇒ a host mapping; `0` with `target_gva` non-zero ⇒ normal-texture
     /// linear guest VA. The two are exclusive, the same way
-    /// [`ColorRtRequest::target_gva`] documents.
+    /// [`ColorRtRequest::target_gva`] documents. Both `0` ⇒ a memoryless texture,
+    /// which has no storage to name.
     pub(super) mapping_id: u32,
     pub(super) target_gva: u64,
     pub(super) width: u32,
@@ -477,6 +478,18 @@ pub(super) enum RenderTargetCause {
     /// list is still being populated, which is why it is reported and not
     /// treated as a decode error.
     NoListEntry,
+    /// A mip>0 view of a memoryless texture. A memoryless attachment is one
+    /// level by Metal's contract, so this names no plane.
+    MemorylessMipView { level: u32 },
+    /// The memoryless entry's descriptor bytes could not be read.
+    MemorylessDescRead,
+    /// The bytes were read and are not a memoryless texture creation record.
+    MemorylessDescDecode { decode: &'static str },
+    /// The memoryless texture declares a zero dimension.
+    MemorylessExtent { width: u32, height: u32 },
+    /// The memoryless texture's format is not one Metal can render into.
+    MemorylessFormat { fmt: u16 },
+
     /// Something is under the ref and it is not a texture.
     WrongType { object_type: u8 },
     /// The texture entry's descriptor bytes could not be read.
@@ -563,6 +576,13 @@ impl crate::observe::Decline for RenderTargetRefusal {
             C::BackingGeometry { .. } => "rt_backing_geometry",
             C::BackingBaseFormat { .. } => "rt_backing_base_format",
             C::BackingFormat { .. } => "rt_backing_format",
+            C::MemorylessMipView { .. } => "rt_memoryless_mip_view",
+            C::MemorylessDescRead => crate::observe::ladder_slug!("rt_memoryless", desc_read),
+            C::MemorylessDescDecode { .. } => {
+                crate::observe::ladder_slug!("rt_memoryless", desc_decode)
+            }
+            C::MemorylessExtent { .. } => "rt_memoryless_extent",
+            C::MemorylessFormat { .. } => "rt_memoryless_format",
             C::NoListEntry => crate::observe::ladder_slug!("rt", no_list_entry),
             C::WrongType { .. } => crate::observe::ladder_slug!("rt", wrong_type),
             C::LinearDescRead => crate::observe::ladder_slug!("rt_linear", desc_read),
@@ -587,9 +607,9 @@ impl crate::observe::Decline for RenderTargetRefusal {
         use RenderTargetCause as C;
         let mut v = vec![("base", self.base_ref.to_string())];
         match self.cause {
-            C::MapperRefTextureMipView { level } | C::LinearLevelGva { level } => {
-                v.push(("level", level.to_string()))
-            }
+            C::MapperRefTextureMipView { level }
+            | C::MemorylessMipView { level }
+            | C::LinearLevelGva { level } => v.push(("level", level.to_string())),
             C::LevelOverflow {
                 view_level,
                 attachment_level,
@@ -652,7 +672,11 @@ impl crate::observe::Decline for RenderTargetRefusal {
                 v.push(("fmt", format!("{fmt:#x}")));
             }
             C::WrongType { object_type } => v.push(("object_type", object_type.to_string())),
-            C::LinearDescDecode { decode } => v.push(("decode", decode.to_string())),
+            C::MemorylessDescDecode { decode } | C::LinearDescDecode { decode } => {
+                v.push(("decode", decode.to_string()))
+            }
+            C::MemorylessExtent { width, height } => v.push(("dims", format!("{width}x{height}"))),
+            C::MemorylessFormat { fmt } => v.push(("fmt", format!("{fmt:#x}"))),
             C::LinearDescIncomplete {
                 format,
                 width,
@@ -708,6 +732,7 @@ impl crate::observe::Decline for RenderTargetRefusal {
             | C::MapperRefTextureUnresolved
             | C::RefTextureDescRead
             | C::RefTextureSurfaceZero
+            | C::MemorylessDescRead
             | C::NoListEntry
             | C::LinearDescRead => {}
         }
@@ -975,6 +1000,46 @@ fn resolve_render_target<M: HostMemory + HostOps>(
             row_stride: 0,
             format: fmt,
             sample_count: 1,
+        });
+    }
+    // Memoryless texture: an attachment with no storage, so it resolves to
+    // neither a mapping nor a guest VA. The draw path keys it on the host alone
+    // and never loads or stores it.
+    if let Some(e) = live
+        .as_ref()
+        .filter(|e| e.object_type == OBJECT_TYPE_MEMORYLESS_TEXTURE)
+    {
+        if level != 0 {
+            return Err(C::MemorylessMipView { level }.at(resolved_ref));
+        }
+        let desc = objects::read_descriptor(state, host, task_id, e)
+            .ok_or(C::MemorylessDescRead.at(resolved_ref))?;
+        let tex = decode_memoryless_texture_descriptor(&desc).map_err(|status| {
+            C::MemorylessDescDecode {
+                decode: crate::observe::Decline::slug(&status),
+            }
+            .at(resolved_ref)
+        })?;
+        if tex.width == 0 || tex.height == 0 {
+            return Err(C::MemorylessExtent {
+                width: tex.width,
+                height: tex.height,
+            }
+            .at(resolved_ref));
+        }
+        let fmt = effective_view_sample_format(tex.pixel_format, view_fmt_override)
+            .unwrap_or(tex.pixel_format);
+        if pixel_format::render_target_bpp(fmt).is_none() {
+            return Err(C::MemorylessFormat { fmt }.at(resolved_ref));
+        }
+        return Ok(ResolvedRenderTarget {
+            mapping_id: 0,
+            target_gva: 0,
+            width: tex.width,
+            height: tex.height,
+            row_stride: 0,
+            format: fmt,
+            sample_count: u32::from(tex.sample_count.max(1)),
         });
     }
     // normal-texture linear GVA (wallpaper/background layers, UI intermediate RTs).

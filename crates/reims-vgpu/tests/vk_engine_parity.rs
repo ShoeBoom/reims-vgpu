@@ -4151,7 +4151,7 @@ fn single_rt_draw_unaffected_by_mrt_path() {
     assert!(!engine::resident_content_ready(&never));
 }
 
-/// Framebuffer fetch (`color_input`): the fragment shader reads its own
+/// Framebuffer fetch (`color_inputs` bit 0): the fragment shader reads its own
 /// destination pixel through the attachment-0 subpass input at the m2v
 /// ColorInput binding (96) and inverts RGB. Seeding the target and drawing the
 /// fullscreen triangle must yield the inverted seed — which proves the input
@@ -4166,7 +4166,7 @@ fn framebuffer_fetch_reads_destination_via_input_attachment() {
     let f = translate_words("render_frag_fetch.air", Stage::Fragment);
     let (w, h) = (16u32, 16u32);
     let mut req = engine_req(&v, &f, w, h);
-    req.color_input = true;
+    req.color_inputs = 1;
     // Seed (64, 128, 191, 255) → expect ~(191, 127, 64, 255).
     req.target_rgba8 = Some(std::sync::Arc::new(
         [64, 128, 191, 255].repeat((w * h) as usize),
@@ -4182,6 +4182,29 @@ fn framebuffer_fetch_reads_destination_via_input_attachment() {
             "fetch: pixel {p} RGBA=({r},{g},{b},{a}); expected ~(191,127,64,255)"
         );
     }
+}
+
+/// Input attachment N is colour attachment N, so fetching slot 1 of a pass
+/// that carries only the primary has nothing to bind and is refused by name.
+#[test]
+fn a_fetch_of_an_attachment_the_pass_lacks_is_refused() {
+    let _g = engine_test_session();
+    let (v, _) = triangle_spirv();
+    let f = translate_words("render_frag_fetch.air", Stage::Fragment);
+    let mut req = engine_req(&v, &f, 16, 16);
+    req.color_inputs = 1 << 1;
+    let s = match engine::execute_draw_request(engine_device(), &req) {
+        Ok(_) => panic!("an unattached fetch must be refused"),
+        Err(e) => e.to_string(),
+    };
+    if skip_if_no_gpu(&s) {
+        eprintln!("SKIP unattached_fetch: no GPU ({s})");
+        return;
+    }
+    assert!(
+        s.contains("reason=color_input_unattached inputs=0x2 color_targets=1"),
+        "got: {s}"
+    );
 }
 
 /// An instrument, not a gate: how a draw's cost splits between a fixed

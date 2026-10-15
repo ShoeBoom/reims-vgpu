@@ -6631,7 +6631,8 @@ pub(super) fn build_secondary_targets<M: HostMemory + HostOps>(
         };
         let format = attachment.vk;
         // Identity mirrors the primary namespaces: normal-texture linear GVA, else
-        // mapper-ref-texture surface.
+        // mapper-ref-texture surface, else (neither) a memoryless texture, keyed by
+        // its ref the way a depth attachment is.
         //
         // A secondary GVA is named by its own backing pages, exactly like color0
         // — the primary's generation describes a different address (a secondary
@@ -6682,16 +6683,15 @@ pub(super) fn build_secondary_targets<M: HostMemory + HostOps>(
                 c.height,
             )
         } else {
-            crate::runtime::census::present_proxy::note_secondary_mrt_drop(
-                crate::runtime::census::present_proxy::MrtDrop::NoIdentity,
-                c.width,
-                c.height,
-            );
-            return Err(SecondaryMrtRefusal {
-                slot: c.slot,
-                reason: crate::runtime::census::present_proxy::MrtDrop::NoIdentity,
-            });
+            TargetIdentity::Texture {
+                ref_: c.texture_ref,
+                width: c.width,
+                height: c.height,
+                generation: 0,
+                stencil: false,
+            }
         };
+        let memoryless = c.target_gva == 0 && c.mapping_id == 0;
         // A secondary aliasing the primary target is a degenerate feedback loop
         // the engine rejects, and a pass that reads and writes one image through
         // two attachments has no correct rendering — so the draw is refused
@@ -6741,6 +6741,11 @@ pub(super) fn build_secondary_targets<M: HostMemory + HostOps>(
         // merely *permits* them, so with nothing to preserve it falls back to
         // the clear — which is legal for it, and is the arm that cannot leak a
         // previous tenant.
+        //
+        // A memoryless attachment declares only Clear or DontCare. It still
+        // loads as a later record of its encoder, which is forced to Load: its
+        // host image carries the encoder's contents across the Vulkan passes
+        // one Metal pass may become.
         let declared = reims_vgpu_protocol::pass_action::LoadAction::from_declared(c.load_action);
         let load = match declared {
             reims_vgpu_protocol::pass_action::LoadAction::Clear => false,
@@ -6753,10 +6758,11 @@ pub(super) fn build_secondary_targets<M: HostMemory + HostOps>(
             declared,
             reims_vgpu_protocol::pass_action::LoadAction::DontCare
         ) && !load
+            && !memoryless
         {
             // Reported only where it still costs the guest: a DontCare whose
             // resident cannot answer for the attachment is the one that still
-            // becomes a clear over live content.
+            // becomes a clear over live content. A memoryless one has none.
             note_load_action_dont_care(pipeline.object_id, c.width, c.height);
         }
         let attachment = attachment.with_clear(c.clear_color);
@@ -7513,28 +7519,23 @@ fn try_metal2vulkan_draw<M: HostMemory + HostOps>(
         };
 
         // Framebuffer fetch (`air.render_target` INPUT param `dest_N` →
-        // reflection `ColorInput` at binding 96+N): the engine supports the
-        // attachment-0 fetch as a Vulkan subpass input. `dest_N>0` (fetching a
-        // secondary MRT attachment) has no engine path yet — fail visibly, never
-        // execute a shader whose destination read would be unbound.
-        let frag_color_input = {
-            use metal2vulkan::reflect::ResourceKind;
-            let mut fetch0 = false;
-            for rb in &f_shader.reflection.bindings {
-                if rb.kind == ResourceKind::ColorInput {
-                    if rb.metal_index == 0 {
-                        fetch0 = true;
-                    } else {
-                        return Err(DrawError::DrawPreparation(
-                            DrawPreparationDecline::ColorInputMrtUnsupported {
-                                destination_index: rb.metal_index,
-                            },
-                        ));
-                    }
-                }
+        // reflection `ColorInput`): bit N asks the engine to bind colour
+        // attachment N as a Vulkan subpass input. The engine refuses a bit
+        // whose attachment this pass lacks; an index past the mask's eight
+        // has none by construction.
+        let mut frag_color_inputs = 0u8;
+        for rb in &f_shader.reflection.bindings {
+            if rb.kind == metal2vulkan::reflect::ResourceKind::ColorInput {
+                let Some(bit) = 1u8.checked_shl(rb.metal_index) else {
+                    return Err(DrawError::DrawPreparation(
+                        DrawPreparationDecline::ColorInputIndexOutOfRange {
+                            destination_index: rb.metal_index,
+                        },
+                    ));
+                };
+                frag_color_inputs |= bit;
             }
-            fetch0
-        };
+        }
         crate::runtime::chain_phase::enter(crate::runtime::chain_phase::Phase::Sampled);
         // The four `sampled_phase` spans below divide this phase's `sampled_us`,
         // the same way `bind_phase` divides `binds_us`. Counted here rather than
@@ -8816,7 +8817,7 @@ fn try_metal2vulkan_draw<M: HostMemory + HostOps>(
         resources.vertex_attributes = attrs;
         resources.storage_buffers = storage;
         resources.sampled_images = images;
-        resources.color_input = frag_color_input;
+        resources.color_inputs = frag_color_inputs;
         resources.continues_render_pass = req.continues_render_pass;
         resources.render_pass_continues = req.render_pass_continues;
         resources.samplers = samplers;

@@ -1361,6 +1361,11 @@ fn storage_format_is_extended(raw: u32) -> bool {
 /// exchange is a capability that is occasionally redundant for a class of bug
 /// that is silent and recurring.
 ///
+/// A `Dim SubpassData` image is not a storage image even though it is
+/// declared `Sampled 2` and `Unknown`: a framebuffer fetch reads it under the
+/// `InputAttachment` capability, and counting it would refuse every fetch on a
+/// host without format-less storage reads.
+///
 /// The walk is structural throughout and never looks at debug names or guest
 /// object ids.
 pub fn required_image_capabilities(words: &[u32]) -> RequiredImageCapabilities {
@@ -1381,11 +1386,12 @@ pub fn required_image_capabilities(words: &[u32]) -> RequiredImageCapabilities {
         }
         match opcode {
             OP_TYPE_IMAGE if word_count >= 9 => {
-                // [7] = Sampled, [8] = Image Format. Sampled 0 means "either",
-                // so it is a possible storage use and counts.
+                // [3] = Dim, [7] = Sampled, [8] = Image Format. Sampled 0 means
+                // "either", so it is a possible storage use and counts.
                 let sampled = words[i + 7];
                 let format = words[i + 8];
-                if sampled == IMAGE_SAMPLED_STORAGE || sampled == 0 {
+                let storage = sampled == IMAGE_SAMPLED_STORAGE || sampled == 0;
+                if storage && words[i + 3] != DIM_SUBPASS_DATA {
                     if storage_format_is_extended(format) {
                         need.extended_formats = true;
                     }
@@ -3839,6 +3845,21 @@ mod more_tests {
             "SPIR-V Capability StorageImageWriteWithoutFormat"
         );
         assert_eq!(patched[9] & 0xffff, 14, "OpMemoryModel follows");
+    }
+
+    /// A framebuffer fetch reads a `Sampled 2`, `Unknown`-format image, but as a
+    /// subpass input, which needs no storage capability.
+    #[test]
+    fn a_subpass_input_read_needs_no_storage_capability() {
+        let mut subpass = op_type_image(10, IMAGE_SAMPLED_STORAGE, 0);
+        subpass[3] = DIM_SUBPASS_DATA;
+        let mut body = subpass.to_vec();
+        body.extend_from_slice(&[(4u32 << 16) | OP_TYPE_POINTER as u32, 11, 0, 10]);
+        body.extend_from_slice(&[(4u32 << 16) | OP_VARIABLE as u32, 11, 12, 0]);
+        body.extend_from_slice(&[(4u32 << 16) | OP_LOAD as u32, 10, 13, 12]);
+        // OpImageRead %v4 %14 %13 %20
+        body.extend_from_slice(&[(5u32 << 16) | OP_IMAGE_READ as u32, 2, 14, 13, 20]);
+        assert!(!required_image_capabilities(&module_with(&body)).any());
     }
 
     /// A write to a *declared*-format image asks for nothing.

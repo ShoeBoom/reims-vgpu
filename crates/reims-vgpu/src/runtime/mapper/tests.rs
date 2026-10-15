@@ -650,38 +650,42 @@ fn put_u64(h: &mut FakeHost, gpa: u64, v: u64) {
 
 #[test]
 fn capture_validates_identity_and_ring() {
-    let mut state = DeviceState::new(DeviceId(1), PAGE_SHIFT_ARM64E);
-    let mut host = FakeHost::new();
-    let ring = 0x7000_0000u64;
-    state.iosfc.ring_base = ring;
+    // Every recovered guest build's registers capture the same request.
+    for layout in MAPPER_LAYOUTS {
+        let mut state = DeviceState::new(DeviceId(1), PAGE_SHIFT_ARM64E);
+        let mut host = FakeHost::new();
+        let ring = 0x7000_0000u64;
+        state.iosfc.ring_base = ring;
 
-    // producer=1 → entry 0: MAP mapping_id=7
-    let mut entry = [0u8; 16];
-    st32(&mut entry[0..], MAPPER_REQUEST_MAP);
-    st32(&mut entry[4..], 7);
-    host.map_range(ring, 16, 0);
-    let _ = host.write_gpa(ring, &entry);
+        // producer=1 → entry 0: MAP mapping_id=7
+        let mut entry = [0u8; 16];
+        st32(&mut entry[0..], MAPPER_REQUEST_MAP);
+        st32(&mut entry[4..], 7);
+        host.map_range(ring, 16, 0);
+        let _ = host.write_gpa(ring, &entry);
 
-    let internal = KVA;
-    let mapper = KVA + 0x1000;
-    // MappingInternal identity fields
-    put_u64(&mut host, internal + MAPPING_INTERNAL_BACKPTR, mapper);
-    put_u32(&mut host, internal + MAPPING_INTERNAL_ID, 7);
-    put_u32(
-        &mut host,
-        internal + MAPPING_INTERNAL_SIZE,
-        MAPPING_INTERNAL_EXPECTED_SIZE,
-    );
+        let internal = KVA;
+        let mapper = KVA + 0x1000;
+        // MappingInternal identity fields
+        put_u64(&mut host, internal + MAPPING_INTERNAL_BACKPTR, mapper);
+        put_u32(&mut host, internal + MAPPING_INTERNAL_ID, 7);
+        put_u32(
+            &mut host,
+            internal + MAPPING_INTERNAL_SIZE,
+            MAPPING_INTERNAL_EXPECTED_SIZE,
+        );
 
-    host.set_xreg(MAPPER_CAPTURE_REG_MAPPER_DEVICE, mapper);
-    host.set_xreg(MAPPER_CAPTURE_REG_REQUEST_TYPE, MAPPER_REQUEST_MAP as u64);
-    host.set_xreg(MAPPER_CAPTURE_REG_MAPPING_INTERNAL, internal);
+        host.set_xreg(layout.mapper_device_reg, mapper);
+        host.set_xreg(layout.request_type_reg, MAPPER_REQUEST_MAP as u64);
+        host.set_xreg(layout.mapping_internal_reg, internal);
 
-    let cap = capture_at_producer(&state, &host, 1).expect("capture");
-    assert_eq!(cap.producer, 1);
-    assert_eq!(cap.mapping_internal, internal);
-    assert!(apply_capture(&mut state, &cap, 7));
-    assert_eq!(state.mappings.get(&7).unwrap().mapping_internal, internal);
+        let cap = capture_at_producer(&state, &host, 1).expect("capture");
+        assert_eq!(cap.producer, 1);
+        assert_eq!(cap.mapping_internal, internal);
+        assert!(apply_capture(&mut state, &cap, 7));
+        assert_eq!(state.mappings.get(&7).unwrap().mapping_internal, internal);
+        assert_eq!(state.mapper_layout, layout);
+    }
 }
 
 #[test]
@@ -703,10 +707,12 @@ fn capture_handoff_mismatch_is_fail_visible_and_latched() {
     let _ = host.write_gpa(ring, &entry);
 
     let internal = KVA;
-    // xreg request-type disagrees with the ring's MAP → handoff mismatch.
-    host.set_xreg(MAPPER_CAPTURE_REG_MAPPER_DEVICE, 0);
-    host.set_xreg(MAPPER_CAPTURE_REG_REQUEST_TYPE, MAPPER_REQUEST_UNMAP as u64);
-    host.set_xreg(MAPPER_CAPTURE_REG_MAPPING_INTERNAL, internal);
+    // xreg request-type disagrees with the ring's MAP under every handoff.
+    let [macos, ios] = MAPPER_LAYOUTS;
+    host.set_xreg(macos.mapper_device_reg, 0);
+    host.set_xreg(macos.request_type_reg, MAPPER_REQUEST_UNMAP as u64);
+    host.set_xreg(macos.mapping_internal_reg, internal);
+    host.set_xreg(ios.request_type_reg, 0);
 
     clear_resolve_fail(9);
     let seen = |m: u32, r: &'static str| {
@@ -739,6 +745,15 @@ fn capture_handoff_mismatch_is_fail_visible_and_latched() {
 ///
 /// Returns `(state, host, page_gpa)`.
 fn span_fixture(pfn: u32) -> (DeviceState, FakeHost, u64) {
+    span_fixture_in(iosurface_pages::MAPPER_LAYOUT_MACOS, pfn)
+}
+
+/// [`span_fixture`] for the `MappingInternal` of one guest kext build, as a
+/// capture under that build's registers would have recorded it.
+fn span_fixture_in(
+    layout: iosurface_pages::MapperLayout,
+    pfn: u32,
+) -> (DeviceState, FakeHost, u64) {
     let mut state = DeviceState::new(DeviceId(1), PAGE_SHIFT_ARM64E);
     let mut host = FakeHost::new();
     let internal = KVA;
@@ -754,22 +769,10 @@ fn span_fixture(pfn: u32) -> (DeviceState, FakeHost, u64) {
         internal + MAPPING_INTERNAL_SIZE,
         MAPPING_INTERNAL_EXPECTED_SIZE,
     );
-    // page fields: 0x48 points at page_obj which has table ptr at +0xb8
-    put_u64(
-        &mut host,
-        internal + iosurface_pages::MAPPING_INTERNAL_PAGE_FIELD_48,
-        page_obj,
-    );
-    put_u64(
-        &mut host,
-        internal + iosurface_pages::MAPPING_INTERNAL_PAGE_FIELD_50,
-        0,
-    );
-    put_u64(
-        &mut host,
-        internal + iosurface_pages::MAPPING_INTERNAL_PAGE_COUNT,
-        1,
-    );
+    // page fields: field 48 points at page_obj which has table ptr at +0xb8
+    put_u64(&mut host, internal + layout.page_field_48, page_obj);
+    put_u64(&mut host, internal + layout.page_field_50, 0);
+    put_u64(&mut host, internal + layout.page_count, 1);
     put_u64(
         &mut host,
         page_obj + iosurface_pages::MAPPING_PAGE_TABLE_FROM_F48,
@@ -781,8 +784,26 @@ fn span_fixture(pfn: u32) -> (DeviceState, FakeHost, u64) {
     host.map_range(page_gpa, PAGE_SIZE_ARM64E as usize, 0x55);
 
     state.mapper_device_kva = mapper;
+    state.mapper_layout = layout;
     assert!(state.attach_mapping_internal(3, internal));
     (state, host, page_gpa)
+}
+
+/// Resolve reads the page fields where the captured guest build keeps them.
+#[test]
+fn resolve_reads_the_page_table_where_each_guest_build_keeps_it() {
+    for (layout, pfn) in iosurface_pages::MAPPER_LAYOUTS
+        .into_iter()
+        .zip([0x1e900_u32, 0x1e901])
+    {
+        let (mut state, host, _page_gpa) = span_fixture_in(layout, pfn);
+        assert!(resolve_mapping_backing(&mut state, &host, 3), "{layout:?}");
+        assert_eq!(
+            state.mappings.get(&3).unwrap().page_entries,
+            vec![(pfn << PAGE_ENTRY_PFN_SHIFT) | PAGE_ENTRY_VALID],
+            "{layout:?}"
+        );
+    }
 }
 
 #[test]

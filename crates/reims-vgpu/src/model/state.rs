@@ -1750,7 +1750,7 @@ impl TaskEntry {
 }
 
 /// Directed mapper capture from guest xregs at iosfc producer write.
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(Clone, Copy, Debug)]
 pub struct MapperCapture {
     /// Producer index that published this request (entry = producer - 1).
     pub producer: u32,
@@ -1758,6 +1758,8 @@ pub struct MapperCapture {
     pub request_type: u32,
     /// Guest kernel VA of MappingInternal.
     pub mapping_internal: u64,
+    /// The guest kext build whose registers agreed with the request.
+    pub layout: crate::protocol::iosurface_pages::MapperLayout,
 }
 
 /// Which incarnation of the pages behind a task-local name a value describes.
@@ -3388,6 +3390,9 @@ pub struct DeviceState {
     pub mapper_capture: Option<MapperCapture>,
     /// Cached IOSurfaceParavirtMapperDevice KVA from capture.
     pub mapper_device_kva: u64,
+    /// The guest kext build's `MappingInternal` layout, from capture. macOS's
+    /// until a capture says otherwise.
+    pub mapper_layout: crate::protocol::iosurface_pages::MapperLayout,
     /// Sync value table for event + encoder fence domains.
     ///
     /// Key: `(task_id, domain_tag, ref)` → value (event: explicit signal value;
@@ -3584,6 +3589,7 @@ impl DeviceState {
             },
             mapper_capture: None,
             mapper_device_kva: 0,
+            mapper_layout: crate::protocol::iosurface_pages::MAPPER_LAYOUT_MACOS,
             display: DisplayHandshake::default(),
             #[cfg(test)]
             fails: Vec::new(),

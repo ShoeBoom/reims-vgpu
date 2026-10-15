@@ -3912,3 +3912,57 @@ fn an_absurd_level_count_refuses_as_a_bad_count_not_as_a_short_body() {
         .iter()
         .any(|l| l.starts_with("dual_plane_levels_over_cap")));
 }
+
+/// A narrow texture creation record as `-[PGSerializer
+/// newTextureWithDescriptor:allocator:]` lays it out, with `resource_options` given.
+fn new_texture_record(
+    pixel_format: u16,
+    width: u32,
+    height: u32,
+    resource_options: u16,
+) -> Vec<u8> {
+    let mut b = Vec::new();
+    b.extend_from_slice(&1u32.to_le_bytes()); // opcode
+    b.extend_from_slice(&44u32.to_le_bytes()); // length
+    b.extend_from_slice(&7u32.to_le_bytes()); // object_ref
+    b.extend_from_slice(&(2 | 4 << 8 | u32::from(pixel_format) << 16).to_le_bytes()); // 2D, render target
+    for v in [width, height, 1] {
+        b.extend_from_slice(&v.to_le_bytes());
+    }
+    for v in [1u16, 1, 1, resource_options] {
+        b.extend_from_slice(&v.to_le_bytes());
+    }
+    b.extend_from_slice(&0u64.to_le_bytes());
+    b
+}
+
+#[test]
+fn a_memoryless_texture_descriptor_is_one_creation_record() {
+    let bytes = new_texture_record(80, 1179, 2556, u16::from(MTL_STORAGE_MODE_MEMORYLESS) << 4);
+    assert_eq!(
+        decode_memoryless_texture_descriptor(&bytes),
+        Ok(MemorylessTextureDescriptor {
+            pixel_format: 80,
+            width: 1179,
+            height: 2556,
+            sample_count: 1,
+        })
+    );
+}
+
+#[test]
+fn a_texture_with_storage_is_not_memoryless() {
+    let private = new_texture_record(80, 64, 64, 2 << 4);
+    assert_eq!(
+        decode_memoryless_texture_descriptor(&private),
+        Err(DecodeStatus::ErrUnsupported(
+            "res_memoryless_desc_storage_mode"
+        ))
+    );
+    let mut wrong_opcode = new_texture_record(80, 64, 64, 3 << 4);
+    wrong_opcode[0] = 0x15;
+    assert_eq!(
+        decode_memoryless_texture_descriptor(&wrong_opcode),
+        Err(DecodeStatus::ErrUnsupported("res_memoryless_desc_opcode"))
+    );
+}

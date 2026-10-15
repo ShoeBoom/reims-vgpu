@@ -96,7 +96,9 @@ pub enum DrawPreparationDecline {
         buffer_index: u32,
         reason: TranslateReason,
     },
-    ColorInputMrtUnsupported {
+    /// The fragment shader fetches `dest_N` past the eight colour attachments
+    /// a render pass can carry.
+    ColorInputIndexOutOfRange {
         destination_index: u32,
     },
     AttachmentAliasIdentityMissing {
@@ -291,7 +293,7 @@ impl Decline for DrawPreparationDecline {
                 }
                 _ => "draw_prepare_vertex_step_function_unsupported",
             },
-            Self::ColorInputMrtUnsupported { .. } => "draw_prepare_color_input_mrt_unsupported",
+            Self::ColorInputIndexOutOfRange { .. } => "draw_prepare_color_input_index_out_of_range",
             Self::AttachmentAliasIdentityMissing { .. } => {
                 "draw_prepare_attachment_alias_identity_missing"
             }
@@ -481,7 +483,7 @@ impl Decline for DrawPreparationDecline {
                 fields.extend(reason.fields());
                 fields
             }
-            Self::ColorInputMrtUnsupported { destination_index } => {
+            Self::ColorInputIndexOutOfRange { destination_index } => {
                 vec![("destination_index", destination_index.to_string())]
             }
             Self::AttachmentAliasIdentityMissing { index, texture_ref } => vec![
@@ -767,8 +769,8 @@ mod tests {
                 buffer_index: 1,
                 reason: TranslateReason::VertexStepFunctionPerPatch(3),
             },
-            DrawPreparationDecline::ColorInputMrtUnsupported {
-                destination_index: 1,
+            DrawPreparationDecline::ColorInputIndexOutOfRange {
+                destination_index: 8,
             },
             DrawPreparationDecline::AttachmentAliasIdentityMissing {
                 index: 2,

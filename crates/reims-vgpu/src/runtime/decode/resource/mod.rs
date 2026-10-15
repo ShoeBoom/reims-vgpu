@@ -93,6 +93,7 @@ impl crate::observe::Decline for DecodeStatus {
 /// | 6 | `createFunction` | `createObject<id<MTLFunction>>` | both |
 /// | 7 | `createObjectInternal` | `createObject<T>`, `T` by subtype | both |
 /// | 8 | `addChildResource` | `createSerializerTexture` | both |
+/// | 9 | `createObjectInternal`, memoryless texture | not recovered | arm |
 /// | 11 | `allocateMapperRefTextureHandle` | `createMapperRefTexture` | arm |
 /// | 12 | `allocateTextureHandle` | `createNormalTexture`, dual-plane | arm |
 /// | 13, 14, 15 | heap, heap buffer, mapper-ref buffer | `createHeap*`, `createMapperRefBuffer` | arm |
@@ -116,6 +117,26 @@ pub const OBJECT_TYPE_FUNCTION: u8 = 6;
 pub const OBJECT_TYPE_SERIALIZER_OBJECT: u8 = 7;
 pub const OBJECT_TYPE_TEXTURE_VIEW: u8 = 8;
 pub const OBJECT_TYPE_MAPPER_REF_TEXTURE: u8 = 11;
+
+/// A texture with `MTLStorageModeMemoryless`: a render attachment with no
+/// storage anywhere, so it names no guest pages and its contents never outlive
+/// the pass.
+///
+/// Recovered from the iOS 26.4 (PCC cloudOS) arm guest. Its Metal driver's
+/// `-[AppleParavirtTexture initWithDevice:descriptor:]` takes a separate branch
+/// when the descriptor's storage mode is memoryless. That branch serializes the
+/// texture with `-[PGSerializer newTextureWithDescriptor:allocator:]` behind a
+/// four-byte object id and sends it through user-client selector `0x100`. The
+/// kext's method for that selector checks the size, strips the id and calls
+/// `addObject` with this tag. So the descriptor is exactly one
+/// [`reims_vgpu_wire::ops::texture`] creation record, narrow or wide. The
+/// kext's other object types allocate storage; this one does not.
+///
+/// iOS CoreAnimation binds one as a secondary colour attachment beside its
+/// display surface, and before this tag was decoded, every draw in those
+/// passes was refused as `rt_wrong_type`. See
+/// [`decode_memoryless_texture_descriptor`].
+pub const OBJECT_TYPE_MEMORYLESS_TEXTURE: u8 = 9;
 
 /// A texture whose storage the guest describes as **two planes**.
 ///
@@ -2380,6 +2401,62 @@ impl DualPlaneTextureDescriptor {
     pub fn pixel_format(&self) -> u16 {
         self.planes[0].pixel_format
     }
+}
+
+/// `MTLStorageModeMemoryless`, the storage nibble of an
+/// [`OBJECT_TYPE_MEMORYLESS_TEXTURE`] creation record.
+/// `reims_vgpu_protocol::storage_mode` refuses this ordinal for resources with
+/// storage, because none of them carries it.
+pub const MTL_STORAGE_MODE_MEMORYLESS: u8 = 3;
+
+/// What a memoryless texture declares: all a render pass needs to allocate an
+/// attachment that is never loaded or stored.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct MemorylessTextureDescriptor {
+    pub pixel_format: u16,
+    pub width: u32,
+    pub height: u32,
+    pub sample_count: u16,
+}
+
+/// Decode an [`OBJECT_TYPE_MEMORYLESS_TEXTURE`] descriptor: one texture creation
+/// record, narrow (opcode 1) or wide (`0x34`), whose storage mode is memoryless.
+pub fn decode_memoryless_texture_descriptor(
+    bytes: &[u8],
+) -> Result<MemorylessTextureDescriptor, DecodeStatus> {
+    use reims_vgpu_wire::ops::texture as w_tex;
+    let short = DecodeStatus::ErrShort("res_memoryless_desc_short");
+    let op = reims_vgpu_wire::op(bytes, 0).map_err(|_| short)?;
+    let (pixel_format, width, height, sample_count, storage_mode) = match op.opcode() {
+        w_tex::OPCODE_NEW_TEXTURE => {
+            let d = &w_tex::new_texture(&op).map_err(|_| short)?.desc;
+            let dims = (d.width.get(), d.height.get(), d.sample_count.get());
+            (d.pixel_format(), dims.0, dims.1, dims.2, d.storage_mode())
+        }
+        w_tex::OPCODE_NEW_TEXTURE_WIDE => {
+            let d = &w_tex::new_texture_wide(&op).map_err(|_| short)?.desc;
+            let dims = (d.width.get(), d.height.get(), d.sample_count.get());
+            (
+                d.pixel_format.get(),
+                dims.0,
+                dims.1,
+                dims.2,
+                d.storage_mode(),
+            )
+        }
+        _ => return Err(DecodeStatus::ErrUnsupported("res_memoryless_desc_opcode")),
+    };
+    if storage_mode != MTL_STORAGE_MODE_MEMORYLESS {
+        return Err(DecodeStatus::ErrUnsupported(
+            "res_memoryless_desc_storage_mode",
+        ));
+    }
+    Ok(MemorylessTextureDescriptor {
+        pixel_format,
+        width,
+        height,
+        sample_count,
+    })
 }
 
 /// Decode an [`OBJECT_TYPE_DUAL_PLANE_TEXTURE`] descriptor.

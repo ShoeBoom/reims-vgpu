@@ -282,7 +282,7 @@ fn the_snapshot_rule_reads_the_same_for_both_rings() {
 }
 
 #[test]
-fn display_descriptor_advertises_four_modes_incl_4k() {
+fn display_descriptor_advertises_the_one_phone_panel_mode() {
     let mut host = FakeHost::new();
     let gpa = 0x7a000000u64;
     host.map_range(gpa, PAGE_SIZE_ARM64E as usize, 0);
@@ -290,23 +290,17 @@ fn display_descriptor_advertises_four_modes_incl_4k() {
     let mut count = [0u8; 2];
     host.read_gpa(gpa + DISPLAY_DESC_TIMING_COUNT, &mut count)
         .unwrap();
-    assert_eq!(u16::from_le_bytes(count), 4);
+    assert_eq!(u16::from_le_bytes(count), 1);
     let read16 = |host: &mut FakeHost, off: u64| {
         let mut b = [0u8; 2];
         host.read_gpa(gpa + off, &mut b).unwrap();
         u16::from_le_bytes(b)
     };
-    // Element 0 (native/preferred) stays 1920×1080; 4K is appended last so
-    // boot resolution is unchanged. Stride 0x10 from base 0x210.
-    assert_eq!(read16(&mut host, 0x210), 1920);
-    assert_eq!(read16(&mut host, 0x212), 1080);
-    assert_eq!(read16(&mut host, 0x220), 1440);
-    assert_eq!(read16(&mut host, 0x230), 1280);
-    assert_eq!(read16(&mut host, 0x240), 3840);
-    assert_eq!(read16(&mut host, 0x242), 2160);
-    // Every element carries the same 120 Hz refresh (16.16 fixed-point).
+    // Element 0 at base 0x210: width, height, then the 16.16 refresh.
+    assert_eq!(read16(&mut host, 0x210), 1179);
+    assert_eq!(read16(&mut host, 0x212), 2556);
     let mut refresh = [0u8; 4];
-    host.read_gpa(gpa + 0x244, &mut refresh).unwrap();
+    host.read_gpa(gpa + 0x214, &mut refresh).unwrap();
     assert_eq!(u32::from_le_bytes(refresh), DISPLAY_REFRESH_HZ << 16);
 }
 
@@ -3041,9 +3035,10 @@ fn the_drain_duty_census_separates_a_flush_tail_from_a_flush_mean() {
         c.note_phase(DrainPhase::Flush(FlushRail::Linear), 1_000);
     }
     c.note_phase(DrainPhase::Flush(FlushRail::Render), 30_000);
-    // Two tranches over a frame budget and one comfortably under it.
+    // Two tranches over a frame budget (at 60 or 120 Hz) and one comfortably
+    // under it.
     c.note(30_000, 0, 5_500);
-    c.note(9_000, 0, 5_600);
+    c.note(20_000, 0, 5_600);
     c.note(1_000, 0, 5_700);
     let line = c
         .note(0, 0, 6_100)
@@ -3052,8 +3047,8 @@ fn the_drain_duty_census_separates_a_flush_tail_from_a_flush_mean() {
 
     assert!(line.contains("max_flush_us=30000"), "{line}");
     assert!(line.contains("flush_us=39000 flushes=10"), "{line}");
-    // Mean is 3.9 ms and would look healthy against an 8 ms budget; the tail is
-    // nearly four times the whole budget.
+    // Mean is 3.9 ms and would look healthy against a frame's budget; the tail
+    // is nearly two whole frames at 60 Hz.
     // Five tranches, not four: the call that closes the window is itself a
     // tranche and is counted in the window it reports.
     assert!(
@@ -3062,7 +3057,8 @@ fn the_drain_duty_census_separates_a_flush_tail_from_a_flush_mean() {
     );
     // The threshold is derived from the delivered VBL cadence, not written
     // down, so it tracks the refresh rate rather than aging beside it.
-    assert!(line.contains("slow_us=8333"), "{line}");
+    let slow_us = 1_000_000 / u64::from(crate::model::DISPLAY_REFRESH_HZ);
+    assert!(line.contains(&format!("slow_us={slow_us}")), "{line}");
 
     // The same window, split by rail. Nine cheap flushes on one rail and one
     // expensive flush on another is exactly the shape the aggregate cannot

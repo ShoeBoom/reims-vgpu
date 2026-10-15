@@ -282,8 +282,8 @@ pub fn iosfc_write<H: HostMemory + HostOps>(
             let producer = data as u32;
             state.iosfc.producer = producer;
             if state.iosfc.consumer != producer {
-                // Capture MappingInternal* while x19/x21/x22 still hold the
-                // publishing vCPU's directed handoff.
+                // Capture MappingInternal* while the publishing vCPU's registers
+                // still hold the directed handoff (`MAPPER_LAYOUTS`).
                 if let Some(cap) = mapper::capture_at_producer(state, host, producer) {
                     state.mapper_capture = Some(cap);
                 }

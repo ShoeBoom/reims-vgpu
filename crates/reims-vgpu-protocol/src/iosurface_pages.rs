@@ -44,14 +44,62 @@ pub const MAPPER_REQUEST_RESERVED: usize = 0x08;
 pub const MAPPER_REQUEST_MAP: u32 = 1;
 pub const MAPPER_REQUEST_UNMAP: u32 = 2;
 
-/*
- * Directed register handoff at do_host_mapping_gated → iosfc producer write:
- * guest leaves mapper device / request type / MappingInternal* in these
- * arm64e xregs (kb + archived reims-vgpu-iosurface-pages format header).
- */
-pub const MAPPER_CAPTURE_REG_MAPPER_DEVICE: u32 = 19;
-pub const MAPPER_CAPTURE_REG_REQUEST_TYPE: u32 = 21;
-pub const MAPPER_CAPTURE_REG_MAPPING_INTERNAL: u32 = 22;
+/// What one build of the guest's `AppleParavirtIOSurface` kext decides that
+/// the device reads: where its `do_host_mapping_gated` holds the mapper device,
+/// the request type and the `MappingInternal*` (arm64e xregs) when it writes
+/// the iosfc producer, which is when the device captures them; and where its
+/// `MappingInternal` keeps the fields that move between builds.
+///
+/// The registers are the kext's register allocation and the offsets its
+/// struct layout, not wire fields, so each build has its own.
+/// [`MAPPER_LAYOUTS`] lists the recovered ones.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct MapperLayout {
+    pub mapper_device_reg: u32,
+    pub request_type_reg: u32,
+    pub mapping_internal_reg: u32,
+    /// The object whose `+MAPPING_PAGE_TABLE_FROM_F48` is the page table.
+    /// Named, like [`MapperInternalFields::page_field_48`], for its macOS offset.
+    pub page_field_48: u64,
+    /// The object whose `+MAPPING_PAGE_TABLE_FROM_F50` is the page table.
+    pub page_field_50: u64,
+    pub page_count: u64,
+}
+
+/// macOS: x19/x21/x22 (kb + archived reims-vgpu-iosurface-pages format
+/// header).
+pub const MAPPER_LAYOUT_MACOS: MapperLayout = MapperLayout {
+    mapper_device_reg: 19,
+    request_type_reg: 21,
+    mapping_internal_reg: 22,
+    page_field_48: 0x48,
+    page_field_50: 0x50,
+    page_count: 0x70,
+};
+
+/// iOS 26.4 (`com.apple.iokit.AppleParavirtIOSurface` in the cloudOS vphone600
+/// kernelcache). `do_host_mapping_gated(this, internal, type)` keeps `this` in
+/// x19, `type` in x20 and `internal` in x21 across the producer store. Its
+/// `MappingInternal` inserts a 16-byte `{pointer, size, offset}` view of a
+/// 0x400-byte descriptor at +0x48, so every field from there moves up by 0x10;
+/// the owner, id and 0x200-byte descriptor fields before it do not move.
+pub const MAPPER_LAYOUT_IOS: MapperLayout = MapperLayout {
+    mapper_device_reg: 19,
+    request_type_reg: 20,
+    mapping_internal_reg: 21,
+    page_field_48: 0x58,
+    page_field_50: 0x60,
+    page_count: 0x80,
+};
+
+/// Every recovered [`MapperLayout`].
+///
+/// The request-type register tells them apart. It must equal the ring entry's
+/// type (MAP or UNMAP), and where macOS keeps the type, iOS keeps the
+/// `MappingInternal*`, an aligned kernel pointer that is never 1 or 2. The
+/// selected layout's `MappingInternal` is then validated in full by
+/// [`validate_mapper_internal`].
+pub const MAPPER_LAYOUTS: [MapperLayout; 2] = [MAPPER_LAYOUT_MACOS, MAPPER_LAYOUT_IOS];
 
 pub const ROW_BYTES_ALIGN: u64 = 128;
 pub const DEVICE_PLANE_DESC_LEN: usize = 0x40;
@@ -112,9 +160,6 @@ pub const MAPPING_INTERNAL_ID: u64 = 0x30;
 pub const MAPPING_INTERNAL_DESC_PTR: u64 = 0x38;
 pub const MAPPING_INTERNAL_SIZE: u64 = 0x40;
 pub const MAPPING_INTERNAL_EXPECTED_SIZE: u32 = 0x200;
-pub const MAPPING_INTERNAL_PAGE_FIELD_48: u64 = 0x48;
-pub const MAPPING_INTERNAL_PAGE_FIELD_50: u64 = 0x50;
-pub const MAPPING_INTERNAL_PAGE_COUNT: u64 = 0x70;
 pub const MAPPING_PAGE_TABLE_FROM_F48: u64 = 0xb8;
 pub const MAPPING_PAGE_TABLE_FROM_F50: u64 = 0x28;
 
@@ -713,18 +758,19 @@ pub fn read_mapper_identity(
 
 pub fn read_mapper_internal(
     mem: &dyn PagesMemory,
+    layout: &MapperLayout,
     internal_kva: u64,
     has_mapper_device: bool,
     mapper_device_kva: u64,
 ) -> Result<MapperInternalFields, Status> {
     let mut fields = read_mapper_identity(mem, internal_kva, has_mapper_device, mapper_device_kva)?;
-    fields.page_field_48 = read_u64_at(mem, internal_kva, MAPPING_INTERNAL_PAGE_FIELD_48).ok_or(
+    fields.page_field_48 = read_u64_at(mem, internal_kva, layout.page_field_48).ok_or(
         Status::ErrInternalRead("iosurface_mapper_page_field_48_read"),
     )?;
-    fields.page_field_50 = read_u64_at(mem, internal_kva, MAPPING_INTERNAL_PAGE_FIELD_50).ok_or(
+    fields.page_field_50 = read_u64_at(mem, internal_kva, layout.page_field_50).ok_or(
         Status::ErrInternalRead("iosurface_mapper_page_field_50_read"),
     )?;
-    fields.raw_page_count = read_u64_at(mem, internal_kva, MAPPING_INTERNAL_PAGE_COUNT)
+    fields.raw_page_count = read_u64_at(mem, internal_kva, layout.page_count)
         .ok_or(Status::ErrInternalRead("iosurface_mapper_page_count_read"))?;
     Ok(fields)
 }

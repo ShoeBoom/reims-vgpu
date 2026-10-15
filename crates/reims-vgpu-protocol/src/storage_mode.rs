@@ -6,10 +6,10 @@
 //! four, which is `MTLResourceOptions`' documented storage-mode shift rather
 //! than a bare mode field. Three ordinals are pinned by fixtures that moved the
 //! nibble alone: shared, managed, private. The public API declares a fourth,
-//! memoryless, and this wire has never been observed carrying it, so it is a
-//! refusal here rather than a variant: a memoryless resource's backing
-//! contract on *this* interface is not established, and a route chosen for it
-//! would be chosen from the SDK's description of a different transport.
+//! memoryless, and no resource with storage carries it, so it is a refusal
+//! here rather than a variant. A memoryless texture does reach the device, but
+//! as an object type of its own with no storage at all (`reims-vgpu`'s
+//! `OBJECT_TYPE_MEMORYLESS_TEXTURE`), so no storage route is ever chosen for it.
 //!
 //! # Private is an announcement, not an access contract
 //!

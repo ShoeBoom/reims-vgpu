@@ -5469,15 +5469,6 @@ fn an_unbuildable_secondary_refuses_the_draw_rather_than_dropping_to_single_rt()
             },
         ),
         (
-            // Neither a linear GVA nor a surface mapping names a resident.
-            MrtDrop::NoIdentity,
-            ColorRtRequest {
-                target_gva: 0,
-                mapping_id: 0,
-                ..good_slot1.clone()
-            },
-        ),
-        (
             // Resolves to the primary's own resident: a pass that reads and
             // writes one image through two attachments.
             MrtDrop::AliasesPrimary,
@@ -5519,6 +5510,78 @@ fn an_unbuildable_secondary_refuses_the_draw_rather_than_dropping_to_single_rt()
         single.is_empty(),
         "one colour attachment produces no secondaries"
     );
+}
+
+/// A memoryless secondary (neither a guest VA nor a mapping) builds as a host-only
+/// resident keyed by its ref, and a later record of its encoder (forced to Load)
+/// loads what the earlier ones drew.
+///
+/// This is iOS CoreAnimation's attachment set: its display surface at slot 0 and
+/// a memoryless scratch target at slot 1.
+#[test]
+fn a_memoryless_secondary_builds_keyed_by_its_ref_and_carries_its_encoder() {
+    use crate::backend::vulkan::engine::TargetIdentity;
+    use crate::runtime::decode::resource::{PipelineColorAttachment, RenderPipelineDescriptor};
+    use reims_vgpu_protocol::pass_action::MTL_LOAD_ACTION_LOAD;
+
+    let mut state = DeviceState::new(DeviceId(1), PAGE_SHIFT_ARM64E);
+    let mut host = crate::runtime::host::FakeHost::new();
+    let pipeline = RenderPipelineDescriptor {
+        color_attachments: (0..2)
+            .map(|slot| PipelineColorAttachment {
+                slot,
+                ..PipelineColorAttachment::default()
+            })
+            .collect(),
+        ..RenderPipelineDescriptor::default()
+    };
+    let primary = TargetIdentity::Gva {
+        gva: 0x1000,
+        width: 64,
+        height: 64,
+        generation: 0,
+        format: crate::backend::vulkan::translate::pixel::RESIDENT_RGBA_FORMAT,
+    };
+    let slot0 = ColorRtRequest {
+        slot: 0,
+        texture_ref: 10,
+        target_gva: 0x1000,
+        width: 64,
+        height: 64,
+        format: MTL_FORMAT_BGRA8_UNORM,
+        ..ColorRtRequest::default()
+    };
+    let memoryless = ColorRtRequest {
+        slot: 1,
+        texture_ref: 22,
+        width: 64,
+        height: 64,
+        format: MTL_FORMAT_BGRA8_UNORM,
+        load_action: MTL_LOAD_ACTION_LOAD,
+        ..ColorRtRequest::default()
+    };
+    let secs = build_secondary_targets(
+        &mut state,
+        &mut host,
+        1,
+        &[slot0, memoryless],
+        &pipeline,
+        &primary,
+        64,
+        64,
+    )
+    .expect("a memoryless secondary is buildable");
+    assert_eq!(secs.len(), 1);
+    assert!(matches!(
+        secs[0].identity,
+        TargetIdentity::Texture {
+            ref_: 22,
+            width: 64,
+            height: 64,
+            ..
+        }
+    ));
+    assert!(secs[0].load, "a later record keeps the encoder's contents");
 }
 
 /// Two attachments over one destination are refused wherever the pair sits, not
@@ -6622,10 +6685,9 @@ fn mapper_ref_texture_sample_resolves_geometry_before_reading_it() {
     use crate::protocol::endian::{st32, st64};
     use crate::protocol::iosurface_pages::{
         DEVICE_DESC_ALLOC_SIZE, DEVICE_DESC_BPR, DEVICE_DESC_DIMS, DEVICE_DESC_LEN,
-        DEVICE_DESC_PIXEL_FORMAT, DEVICE_DESC_PLANE_COUNT, MAPPING_INTERNAL_BACKPTR,
-        MAPPING_INTERNAL_DESC_PTR, MAPPING_INTERNAL_EXPECTED_SIZE, MAPPING_INTERNAL_ID,
-        MAPPING_INTERNAL_PAGE_COUNT, MAPPING_INTERNAL_PAGE_FIELD_48,
-        MAPPING_INTERNAL_PAGE_FIELD_50, MAPPING_INTERNAL_SIZE, MAPPING_PAGE_TABLE_FROM_F48,
+        DEVICE_DESC_PIXEL_FORMAT, DEVICE_DESC_PLANE_COUNT, MAPPER_LAYOUT_MACOS,
+        MAPPING_INTERNAL_BACKPTR, MAPPING_INTERNAL_DESC_PTR, MAPPING_INTERNAL_EXPECTED_SIZE,
+        MAPPING_INTERNAL_ID, MAPPING_INTERNAL_SIZE, MAPPING_PAGE_TABLE_FROM_F48,
         PAGE_ENTRY_PFN_SHIFT, PAGE_ENTRY_VALID,
     };
     use crate::runtime::host::HostMemory;
@@ -6665,11 +6727,11 @@ fn mapper_ref_texture_sample_resolves_geometry_before_reading_it() {
     );
     put_u64(
         &mut host,
-        internal + MAPPING_INTERNAL_PAGE_FIELD_48,
+        internal + MAPPER_LAYOUT_MACOS.page_field_48,
         page_obj,
     );
-    put_u64(&mut host, internal + MAPPING_INTERNAL_PAGE_FIELD_50, 0);
-    put_u64(&mut host, internal + MAPPING_INTERNAL_PAGE_COUNT, 1);
+    put_u64(&mut host, internal + MAPPER_LAYOUT_MACOS.page_field_50, 0);
+    put_u64(&mut host, internal + MAPPER_LAYOUT_MACOS.page_count, 1);
     put_u64(&mut host, internal + MAPPING_INTERNAL_DESC_PTR, desc_kva);
     put_u64(&mut host, page_obj + MAPPING_PAGE_TABLE_FROM_F48, table);
 
