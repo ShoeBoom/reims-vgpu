@@ -2924,7 +2924,7 @@ pub fn read_resident_bgra(identity: &TargetIdentity, need: usize) -> Option<Vec<
             return None;
         }
     }
-    let mut px = match read_target_inner(identity) {
+    let px = match read_target_inner(identity) {
         // `into_bgra8` is a no-op for a resident already in scanout order, which
         // is every one this rail sees on a boot measured so far. A native frame
         // has no scanout order at all — there is nothing to present — so it
@@ -2950,10 +2950,15 @@ pub fn read_resident_bgra(identity: &TargetIdentity, need: usize) -> Option<Vec<
             return None;
         }
     };
-    if px.len() < need {
+    // An oversized readback is a resident of another geometry: its rows are
+    // not the caller's rows, and truncating it would shear the frame.
+    if px.len() != need {
+        crate::observe::off(format!(
+            "present_capture reason=readback_size_mismatch got={} need={need}",
+            px.len()
+        ));
         return None;
     }
-    px.truncate(need);
     Some(px)
 }
 
